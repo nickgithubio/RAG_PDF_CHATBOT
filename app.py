@@ -2,269 +2,232 @@ import streamlit as st
 from pypdf import PdfReader
 import pandas as pd
 import base64
-import numpy as np
-
-import os
-
-# Update imports for LangChain
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import FAISS
-# updated
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.runnables import RunnableMap
-from langchain_core.output_parsers import StrOutputParser
-
-
-from langchain_core.prompts import PromptTemplate
-
-
-
-
 from datetime import datetime
+import os
+import time
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
 
-import asyncio
-
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-
+# -----------------------------
+# PDF TEXT EXTRACTION
+# -----------------------------
 def get_pdf_text(pdf_docs):
     text = ""
     for pdf in pdf_docs:
         pdf_reader = PdfReader(pdf)
         for page in pdf_reader.pages:
-            text += page.extract_text()
+            content = page.extract_text()
+            if content:
+                text += content
     return text
 
-def get_text_chunks(text, model_name):
-    if model_name == "Google AI":
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
-    chunks = text_splitter.split_text(text)
-    return chunks
 
-
-# Updated with huggingface embeddings
-
-def get_vector_store(text_chunks, model_name, api_key=None):
-    if model_name == "Google AI":
-        # Replace Gemini with HuggingFace all-MiniLM
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vector_store = FAISS.from_texts(text_chunks, embeddings)
-    vector_store.save_local("faiss_index")
-    return vector_store
-
-
-def get_conversational_chain(model_name, vectorstore=None, api_key=None):
-    if model_name == "Google AI":
-        prompt_template = """
-        Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in
-        provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
-        Context:\n {context}?\n
-        Question: \n{question}\n
-
-        Answer:
-        """
-        model = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.3, google_api_key=api_key)
-        prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-        qa_chain = (
-            RunnableMap(
-            {"context": vectorstore.as_retriever(), "input": lambda x:x})
-            | prompt
-            | model
-            | StrOutputParser()
-        )
-        response = qa_chain.invoke(user_input)
-def user_input(user_question, model_name, api_key, pdf_docs, conversation_history):
-    if api_key is None or pdf_docs is None:
-        st.warning("Please upload PDF files and provide API key before processing.")
-        return
-    text_chunks = get_text_chunks(get_pdf_text(pdf_docs), model_name)
-    vector_store = get_vector_store(text_chunks, model_name, api_key)
-    user_question_output = ""
-    response_output = ""
-    # updated to huggingface embedding
-    if model_name == "Google AI":
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        docs = new_db.similarity_search(user_question)
-        chain = get_conversational_chain("Google AI", vectorstore=new_db, api_key=api_key)
-        # huggingface update
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        user_question_output = user_question
-        response_output = response['output_text']
-        pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
-        conversation_history.append((user_question_output, response_output, model_name, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ", ".join(pdf_names)))
-
-        # conversation_history.append((user_question_output, response_output, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ", ".join(pdf_names)))
-
-    # Kullanıcının sorduğu soruyu ve cevabı bir banner olarak ekleyelim
-    st.markdown(
-        f"""
-        <style>
-            .chat-message {{
-                padding: 1.5rem;
-                border-radius: 0.5rem;
-                margin-bottom: 1rem;
-                display: flex;
-            }}
-            .chat-message.user {{
-                background-color: #2b313e;
-            }}
-            .chat-message.bot {{
-                background-color: #475063;
-            }}
-            .chat-message .avatar {{
-                width: 20%;
-            }}
-            .chat-message .avatar img {{
-                max-width: 78px;
-                max-height: 78px;
-                border-radius: 50%;
-                object-fit: cover;
-            }}
-            .chat-message .message {{
-                width: 80%;
-                padding: 0 1.5rem;
-                color: #fff;
-            }}
-            .chat-message .info {{
-                font-size: 0.8rem;
-                margin-top: 0.5rem;
-                color: #ccc;
-            }}
-        </style>
-        <div class="chat-message user">
-            <div class="avatar">
-                <img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png">
-            </div>    
-            <div class="message">{user_question_output}</div>
-        </div>
-        <div class="chat-message bot">
-            <div class="avatar">
-                <img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp" >
-            </div>
-            <div class="message">{response_output}</div>
-            </div>
-            
-        """,
-        unsafe_allow_html=True
+# -----------------------------
+# TEXT CHUNKING
+# -----------------------------
+def get_text_chunks(text):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
     )
-            # <div class="info" style="margin-left: 20px;">Timestamp: {datetime.now()}</div>
-            # <div class="info" style="margin-left: 20px;">PDF Name: {", ".join(pdf_names)}</div>
-    if len(conversation_history) == 1:
-        conversation_history = []
-    elif len(conversation_history) > 1 :
-        last_item = conversation_history[-1]  # Son öğeyi al
-        conversation_history.remove(last_item) 
-    for question, answer, model_name, timestamp, pdf_name in reversed(conversation_history):
-        st.markdown(
-            f"""
-            <div class="chat-message user">
-                <div class="avatar">
-                    <img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png">
-                </div>    
-                <div class="message">{question}</div>
-            </div>
-            <div class="chat-message bot">
-                <div class="avatar">
-                    <img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp" >
-                </div>
-                <div class="message">{answer}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-                # <div class="info" style="margin-left: 20px;">Timestamp: {timestamp}</div>
-                # <div class="info" style="margin-left: 20px;">PDF Name: {pdf_name}</div>
+    return splitter.split_text(text)
 
-    if len(st.session_state.conversation_history) > 0:
-        df = pd.DataFrame(st.session_state.conversation_history, columns=["Question", "Answer", "Model", "Timestamp", "PDF Name"])
 
-        # df = pd.DataFrame(st.session_state.conversation_history, columns=["Question", "Answer", "Timestamp", "PDF Name"])
-        csv = df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()  # Convert to base64
-        href = f'<a href="data:file/csv;base64,{b64}" download="conversation_history.csv"><button>Download conversation history as CSV file</button></a>'
-        st.sidebar.markdown(href, unsafe_allow_html=True)
-        st.markdown("To download the conversation, click the Download button on the left side at the bottom of the conversation.")
-    st.snow()
+# -----------------------------
+# CREATE VECTOR STORE
+# -----------------------------
+def create_vector_store(text_chunks):
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
+    vector_store.save_local("faiss_index")
+
+
+# -----------------------------
+# LOAD VECTOR STORE
+# -----------------------------
+def load_vector_store():
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+    return FAISS.load_local(
+        "faiss_index",
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
+
+
+# -----------------------------
+# FORMAT RETRIEVED DOCS
+# -----------------------------
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+# -----------------------------
+# CREATE QA CHAIN
+# -----------------------------
+def get_qa_chain(api_key, vectorstore):
+
+    prompt_template = """
+    Answer the question as detailed as possible using ONLY the provided context.
+    If the answer is not present in the context, say:
+    "Answer is not available in the context."
+
+    Context:
+    {context}
+
+    Question:
+    {question}
+
+    Answer:
+    """
+
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "question"]
+    )
+
+    # ✅ Stable Gemini Model
+    model = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        temperature=0.3,
+        google_api_key=api_key
+    )
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+
+    chain = (
+        {
+            "context": retriever | format_docs,
+            "question": RunnablePassthrough()
+        }
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+
+    return chain
+
+
+# -----------------------------
+# HANDLE QUESTION
+# -----------------------------
+def handle_user_question(user_question, api_key):
+    if not os.path.exists("faiss_index"):
+        return "Please upload and process PDFs first."
+
+    try:
+        vectorstore = load_vector_store()
+        chain = get_qa_chain(api_key, vectorstore)
+
+        response = chain.invoke(user_question)
+        return response
+
+    except Exception as e:
+        error_msg = str(e)
+
+        if "404" in error_msg:
+            return "Model not found. Make sure Gemini API is enabled."
+        elif "429" in error_msg:
+            return "Rate limit exceeded. Try again later."
+        elif "api" in error_msg.lower():
+            return "Invalid API Key. Check your Google API key."
+        else:
+            return f"Error: {error_msg}"
+
+
+# -----------------------------
+# MAIN STREAMLIT APP
+# -----------------------------
 def main():
-    st.set_page_config(page_title="Chat with multiple PDFs", page_icon=":books:")
-    st.header("Chat with multiple PDFs (v1) :books:")
+    st.set_page_config(page_title="Chat with PDFs", page_icon="📚")
+    st.header("Chat with Multiple PDFs 📚")
 
-    if 'conversation_history' not in st.session_state:
+    if "conversation_history" not in st.session_state:
         st.session_state.conversation_history = []
-    linkedin_profile_link = "https://www.linkedin.com/in/nikhilchaudharyds/"
-    #kaggle_profile_link = "https://www.kaggle.com/snsupratim/"
-    github_profile_link = "https://github.com/nickgithubio/"
+
+    # Sidebar
+    st.sidebar.title("Menu")
+
+    api_key = st.sidebar.text_input(
+        "Enter your Google API Key:",
+        type="password"
+    )
 
     st.sidebar.markdown(
-        f"[![LinkedIn](https://www.linkedin.com/in/nikhilchaudharyds/)]({linkedin_profile_link}) "
-        #f"[![Kaggle](https://img.shields.io/badge/Kaggle-20BEFF?style=for-the-badge&logo=kaggle&logoColor=white)]({kaggle_profile_link}) "
-        f"[![GitHub](https://github.com/nickgithubio)]({github_profile_link})"
+        "Get API key from: https://makersuite.google.com/app/apikey"
     )
 
+    pdf_docs = st.sidebar.file_uploader(
+        "Upload PDF Files",
+        accept_multiple_files=True,
+        type=['pdf']
+    )
 
-
-    model_name = st.sidebar.radio("Select the Model:", ( "Google AI"))
-
-    api_key = None
-
-    if model_name == "Google AI":
-        api_key = st.sidebar.text_input("Enter your Google API Key:")
-        st.sidebar.markdown("Click [here](https://ai.google.dev/) to get an API key.")
-        
-        if not api_key:
-            st.sidebar.warning("Please enter your Google API Key to proceed.")
-            return
-
-   
-    with st.sidebar:
-        st.title("Menu:")
-        
-        col1, col2 = st.columns(2)
-        
-        reset_button = col2.button("Reset")
-        clear_button = col1.button("Rerun")
-
-        if reset_button:
-            st.session_state.conversation_history = []  # Clear conversation history
-            st.session_state.user_question = None  # Clear user question input 
-            
-            
-            api_key = None  # Reset Google API key
-            pdf_docs = None  # Reset PDF document
-            
+    if st.sidebar.button("Submit & Process"):
+        if not pdf_docs:
+            st.sidebar.warning("Please upload PDFs.")
+        elif not api_key:
+            st.sidebar.warning("Please enter your Google API Key.")
         else:
-            if clear_button:
-                if 'user_question' in st.session_state:
-                    st.warning("The previous query will be discarded.")
-                    st.session_state.user_question = ""  # Temizle
-                    if len(st.session_state.conversation_history) > 0:
-                        st.session_state.conversation_history.pop()  # Son sorguyu kaldır
+            with st.spinner("Processing PDFs..."):
+                raw_text = get_pdf_text(pdf_docs)
+
+                if not raw_text.strip():
+                    st.sidebar.error("No text extracted from PDFs.")
                 else:
-                    st.warning("The question in the input will be queried again.")
+                    text_chunks = get_text_chunks(raw_text)
+                    create_vector_store(text_chunks)
+                    st.sidebar.success(
+                        f"Processing complete! Created {len(text_chunks)} chunks."
+                    )
 
-
-
-
-        pdf_docs = st.file_uploader("Upload your PDF Files and Click on the Submit & Process Button", accept_multiple_files=True)
-        if st.button("Submit & Process"):
-            if pdf_docs:
-                with st.spinner("Processing..."):
-                    st.success("Done")
-            else:
-                st.warning("Please upload PDF files before processing.")
-
-    user_question = st.text_input("Ask a Question from the PDF Files")
+    # Question Input
+    user_question = st.text_input("Ask a Question from the PDFs")
 
     if user_question:
-        user_input(user_question, model_name, api_key, pdf_docs, st.session_state.conversation_history)
-        st.session_state.user_question = ""  # Clear user question input 
+        if not api_key:
+            st.warning("Please enter your API key.")
+        else:
+            with st.spinner("Generating answer..."):
+                response = handle_user_question(user_question, api_key)
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                st.session_state.conversation_history.append(
+                    (user_question, response, timestamp)
+                )
+
+    # Display Chat History
+    if st.session_state.conversation_history:
+        st.markdown("### 💬 Chat")
+        for question, answer, time_val in reversed(st.session_state.conversation_history):
+            st.markdown(f"**You:** {question}")
+            st.markdown(f"**Bot:** {answer}")
+            st.markdown(f"_Time: {time_val}_")
+            st.markdown("---")
+
+    # Download Chat History
+    if st.session_state.conversation_history:
+        df = pd.DataFrame(
+            st.session_state.conversation_history,
+            columns=["Question", "Answer", "Timestamp"]
+        )
+
+        csv = df.to_csv(index=False)
+        b64 = base64.b64encode(csv.encode()).decode()
+        href = f'<a href="data:file/csv;base64,{b64}" download="chat_history.csv">📥 Download Chat History</a>'
+        st.sidebar.markdown(href, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
